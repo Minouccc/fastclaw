@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,7 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
 import {
   getAgent,
   getConfig,
@@ -138,6 +138,7 @@ export default function ModelsPage() {
 
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [model, setModel] = useState("");
+  const [modelFallbacks, setModelFallbacks] = useState<string[]>([]);
   // System-only resolution from /api/config?meta. For super_admin this
   // equals `model` always (they ARE system); for regular users it's the
   // value they'd inherit if their user-scope override were cleared. Used
@@ -211,6 +212,13 @@ export default function ModelsPage() {
     return out;
   })();
 
+  const sanitizeFallbacks = useCallback((values: string[], primary: string) => {
+    const seen = new Set<string>();
+    return values
+      .map((v) => v.trim())
+      .filter((v) => v && v !== primary && !seen.has(v) && (seen.add(v), true));
+  }, []);
+
   // Providers are stored in the configs table and only round-trip through
   // the dedicated /api/providers endpoints — POST /api/config silently
   // ignores the providers map. agents.defaults.model is read off the
@@ -271,6 +279,7 @@ export default function ModelsPage() {
           ];
       setProviders(entries);
       setModel(cfg?.agents?.defaults?.model || "");
+      setModelFallbacks(sanitizeFallbacks(cfg?.agents?.defaults?.modelFallbacks || [], cfg?.agents?.defaults?.model || ""));
       setSystemDefault(cfg?.meta?.systemDefaultModel || "");
       const ag = (agentRec as { agent?: { name?: string; model?: string; shareModelConfig?: boolean } } | null)?.agent;
       setAgentName(ag?.name || "");
@@ -528,9 +537,11 @@ export default function ModelsPage() {
   // `omitempty` on AgentDefaults.Model drops the key from the saved row
   // without disturbing sibling fields, so it's safe to send through.
   const handleSaveAll = async () => {
+    const cleanedFallbacks = model.trim() ? sanitizeFallbacks(modelFallbacks, model.trim()) : [];
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: model.trim() } } });
+      await updateConfig({ agents: { defaults: { model: model.trim(), modelFallbacks: cleanedFallbacks } } });
+      setModelFallbacks(cleanedFallbacks);
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
@@ -539,11 +550,13 @@ export default function ModelsPage() {
   };
 
   const handleDefaultModelChange = async (value: string) => {
+    const cleanedFallbacks = sanitizeFallbacks(modelFallbacks, value.trim());
     setModel(value);
+    setModelFallbacks(cleanedFallbacks);
     if (!value.trim()) return;
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: value.trim() } } });
+      await updateConfig({ agents: { defaults: { model: value.trim(), modelFallbacks: cleanedFallbacks } } });
       flashSaved();
       // Refresh so Inheriting/Override badge reflects the new state.
       await fetchConfig(isSuperAdmin, me?.id || "");
@@ -557,14 +570,47 @@ export default function ModelsPage() {
   // just stores "" at user scope which still wins the merge — instead
   // we send a null/undefined which the backend treats as "delete row".
   const handleClearOverride = async () => {
+    setModel("");
+    setModelFallbacks([]);
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: "" } } });
+      await updateConfig({ agents: { defaults: { model: "", modelFallbacks: [] } } });
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
       setSaving(false);
     }
+  };
+
+  const fallbackChoices = allModelOptions.filter((opt) => opt.value !== model);
+
+  const handleAddFallback = () => {
+    const used = new Set(modelFallbacks);
+    const next = fallbackChoices.find((opt) => !used.has(opt.value));
+    if (!next) return;
+    setModelFallbacks((prev) => [...prev, next.value]);
+  };
+
+  const handleChangeFallback = (index: number, value: string) => {
+    setModelFallbacks((prev) => {
+      const next = [...prev];
+      next[index] = value;
+      return sanitizeFallbacks(next, model);
+    });
+  };
+
+  const handleMoveFallback = (index: number, dir: -1 | 1) => {
+    setModelFallbacks((prev) => {
+      const swap = index + dir;
+      if (swap < 0 || swap >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[swap]] = [next[swap], next[index]];
+      return next;
+    });
+  };
+
+  const handleRemoveFallback = (index: number) => {
+    setModelFallbacks((prev) => prev.filter((_, i) => i !== index));
   };
 
   if (loading) {
@@ -722,6 +768,68 @@ export default function ModelsPage() {
             </>
           )}
         </p>
+        <div className="mt-4 border-t border-border/60 pt-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-medium">Fallback Order</h4>
+              <p className="text-xs text-muted-foreground mt-1">
+                When the active model returns a quota-style error like <code className="text-[11px]">AllocationQuota.FreeTierOnly</code>, FastClaw will try the next model in this order.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleAddFallback}
+              disabled={saving || !model.trim() || modelFallbacks.length >= fallbackChoices.length}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add Fallback
+            </Button>
+          </div>
+          {!model.trim() ? (
+            <p className="text-xs text-muted-foreground">
+              Pick an active model first, then arrange the fallback chain.
+            </p>
+          ) : modelFallbacks.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No fallback models configured yet.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {modelFallbacks.map((fallback, index) => {
+                const usedElsewhere = new Set(modelFallbacks.filter((_, i) => i !== index));
+                const rowOptions = fallbackChoices.filter((opt) => opt.value === fallback || !usedElsewhere.has(opt.value));
+                return (
+                  <div key={`${fallback}-${index}`} className="flex items-center gap-2">
+                    <span className="w-5 text-xs text-muted-foreground text-right">{index + 1}.</span>
+                    <Select value={fallback} onValueChange={(v: string | null) => v && handleChangeFallback(index, v)} disabled={saving}>
+                      <SelectTrigger className="font-mono text-sm">
+                        <SelectValue placeholder="Select fallback model" />
+                      </SelectTrigger>
+                      <SelectContent className="!w-auto !min-w-[var(--anchor-width)] !overflow-x-visible">
+                        {rowOptions.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value}>
+                            <span className="font-mono text-sm whitespace-nowrap">{opt.value}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleMoveFallback(index, -1)} disabled={saving || index === 0}>
+                      <ArrowUp className="h-4 w-4" />
+                    </Button>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleMoveFallback(index, 1)} disabled={saving || index === modelFallbacks.length - 1}>
+                      <ArrowDown className="h-4 w-4" />
+                    </Button>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleRemoveFallback(index)} disabled={saving}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
         );
       })()}

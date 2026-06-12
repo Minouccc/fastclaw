@@ -90,6 +90,7 @@ export interface AgentDetail {
   // own model/providers or the agent doesn't work for them.
   shareModelConfig?: boolean;
   model: string;
+  modelFallbacks?: string[];
   workspace?: string;
   maxTokens?: number;
   temperature?: number;
@@ -218,6 +219,7 @@ export interface ConfigResponse {
   agents: {
     defaults: {
       model: string;
+      modelFallbacks?: string[];
       maxTokens: number;
       temperature: number;
       maxToolIterations: number;
@@ -1235,6 +1237,7 @@ export interface AgentUpdatePayload {
   name?: string;
   description?: string;
   model?: string;
+  modelFallbacks?: string[];
   soul?: string;
   skills?: AgentSkillsConfig;
   // Whole-map replace: omit to leave providers untouched, send {} to

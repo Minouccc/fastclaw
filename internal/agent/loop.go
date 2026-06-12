@@ -33,6 +33,7 @@ import (
 type Agent struct {
 	name                 string
 	provider             provider.Provider
+	providerConfigs      map[string]config.ProviderConfig
 	registry             *tools.Registry
 	sessions             *session.Manager
 	memory               *Memory
@@ -40,6 +41,7 @@ type Agent struct {
 	mcpMgr               *mcp.Manager
 	hooks                *HookRegistry
 	model                string
+	modelFallbacks       []string
 	maxTokens            int
 	temperature          float64
 	maxToolIterations    int
@@ -296,12 +298,14 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	ag := &Agent{
 		name:                 rc.ID,
 		provider:             prov,
+		providerConfigs:      cloneProviderConfigs(rc.Providers),
 		registry:             registry,
 		sessions:             session.NewManager(rc.Home + "/sessions"),
 		memory:               memory,
 		ctxBuilder:           newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend, rc.PromptMode),
 		hooks:                hooks,
 		model:                rc.Model,
+		modelFallbacks:       append([]string(nil), rc.ModelFallbacks...),
 		maxTokens:            rc.MaxTokens,
 		temperature:          rc.Temperature,
 		maxToolIterations:    rc.MaxToolIterations,
@@ -630,10 +634,14 @@ func (a *Agent) SetMeter(m usage.Meter) { a.meter = m }
 // override is set; we split it so the meter stores provider and model
 // in their own columns rather than mashing them together.
 func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage) {
+	a.meterTokensForModel(ctx, sessionKey, a.model, u)
+}
+
+func (a *Agent) meterTokensForModel(ctx context.Context, sessionKey, model string, u provider.Usage) {
 	if a.meter == nil {
 		return
 	}
-	prov, mdl := provider.SplitProviderModel(a.model)
+	prov, mdl := provider.SplitProviderModel(model)
 	err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl,
 		usage.Tokens{
 			Input:         u.InputTokens,
@@ -663,7 +671,7 @@ func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.U
 // HandleMessage path. Providers that don't actually stream still work
 // — they just deliver one big chunk on Done.
 func (a *Agent) streamChatToResponse(ctx context.Context, messages []provider.Message, tools []provider.Tool) (*provider.Response, error) {
-	sr, err := a.provider.ChatStream(ctx, messages, tools, a.model, a.maxTokens, a.temperature)
+	sr, _, err := a.chatStreamWithFallback(ctx, messages, tools)
 	if err != nil {
 		return nil, err
 	}
@@ -1617,7 +1625,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
-	if a.provider == nil {
+	if len(a.llmAttempts()) == 0 {
 		noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
 		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
@@ -1928,7 +1936,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			llmMessages = privacy.ScrubMessages(messages)
 		}
 
-		if a.provider == nil {
+		if len(a.llmAttempts()) == 0 {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
 			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
@@ -2592,7 +2600,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		a.hooks.Run(ctx, hcBefore)
 
 		dumpLLMRequest(a.name, a.model, messages, toolDefs)
-		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
+		resp, usedModel, err := a.chatWithFallback(ctx, messages, toolDefs)
 
 		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
 		a.hooks.Run(ctx, hcAfter)
@@ -2601,12 +2609,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			slog.Error("LLM chat failed", "agent", a.name, "error", err)
 			return a.stringStream("Sorry, I encountered an error processing your request.")
 		}
-		a.meterTokens(ctx, sess.Key(), resp.Usage)
+		a.meterTokensForModel(ctx, sess.Key(), usedModel, resp.Usage)
 		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
 			// Final response - use streaming
-			sr, err := a.provider.ChatStream(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
+			sr, _, err := a.chatStreamWithFallback(ctx, messages, toolDefs)
 			if err != nil {
 				slog.Error("LLM stream failed, falling back", "agent", a.name, "error", err)
 				sess.Append(provider.Message{Role: "assistant", Content: resp.Content})
@@ -2769,7 +2777,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory) *provider.StreamReader {
 	capMeta := iterationCapMetadata(a.maxToolIterations)
 	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
-	sr, err := a.provider.ChatStream(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	sr, usedModel, err := a.chatStreamWithFallback(ctx, finalMessages, nil)
 	if err != nil {
 		// Streaming endpoint failed — persist+emit a fallback line
 		// with the badge so the user still gets the signal.
@@ -2816,7 +2824,7 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.
 				return
 			}
 		}
-		a.meterTokens(ctx, sess.Key(), streamUsage)
+		a.meterTokensForModel(ctx, sess.Key(), usedModel, streamUsage)
 		content := full.String()
 		if content == "" {
 			content = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
@@ -3033,6 +3041,8 @@ func (a *Agent) chatterLocation(chatterUID string) *time.Location {
 // UpdateConfig updates the agent's runtime config (model, temperature, etc.)
 func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.model = rc.Model
+	a.modelFallbacks = append([]string(nil), rc.ModelFallbacks...)
+	a.providerConfigs = cloneProviderConfigs(rc.Providers)
 	a.maxTokens = rc.MaxTokens
 	a.temperature = rc.Temperature
 	a.maxToolIterations = rc.MaxToolIterations

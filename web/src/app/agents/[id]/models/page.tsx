@@ -30,7 +30,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
-import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2, Share2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2, Share2 } from "lucide-react";
 import {
   getAgent,
   getConfig,
@@ -134,6 +134,7 @@ export default function AgentModelsPage() {
 
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [model, setModel] = useState("");
+  const [modelFallbacks, setModelFallbacks] = useState<string[]>([]);
   const [systemDefault, setSystemDefault] = useState("");
   const [systemProviders, setSystemProviders] = useState<string[]>([]);
   // Default true so the toggle reflects the on-state during the brief
@@ -192,6 +193,13 @@ export default function AgentModelsPage() {
     return out;
   }, [providers]);
 
+  const sanitizeFallbacks = useCallback((values: string[], primary: string) => {
+    const seen = new Set<string>();
+    return values
+      .map((v) => v.trim())
+      .filter((v) => v && v !== primary && !seen.has(v) && (seen.add(v), true));
+  }, []);
+
   const fetchAll = useCallback(async () => {
     if (!agentId) return;
     setLoading(true);
@@ -245,6 +253,7 @@ export default function AgentModelsPage() {
       // type from before per-agent overrides moved out of the merged
       // config; the Go side never populates it.
       setModel(agentRec?.model || "");
+      setModelFallbacks(sanitizeFallbacks(agentRec?.modelFallbacks || [], agentRec?.model || ""));
       // Backend always emits a definitive boolean (see agentShareModelConfig);
       // the ?? guards against a stale shape if the page is hit before
       // the binary upgrade lands.
@@ -252,7 +261,7 @@ export default function AgentModelsPage() {
     } finally {
       setLoading(false);
     }
-  }, [agentId]);
+  }, [agentId, sanitizeFallbacks]);
 
   useEffect(() => {
     fetchAll();
@@ -470,11 +479,12 @@ export default function AgentModelsPage() {
   };
 
   const handleModelChange = async (value: string) => {
+    const nextFallbacks = sanitizeFallbacks(modelFallbacks, value);
     setModel(value);
+    setModelFallbacks(nextFallbacks);
     setSaving(true);
     try {
-      // Empty string means "clear override → inherit system default".
-      await updateAgent(agentId, { model: value });
+      await updateAgent(agentId, { model: value, modelFallbacks: nextFallbacks });
       flashSaved();
     } finally {
       setSaving(false);
@@ -483,13 +493,53 @@ export default function AgentModelsPage() {
 
   const handleClearOverride = async () => {
     setModel("");
+    setModelFallbacks([]);
     setSaving(true);
     try {
-      await updateAgent(agentId, { model: "" });
+      await updateAgent(agentId, { model: "", modelFallbacks: [] });
       flashSaved();
     } finally {
       setSaving(false);
     }
+  };
+
+  const persistFallbacks = async (next: string[]) => {
+    const cleaned = sanitizeFallbacks(next, model);
+    setModelFallbacks(cleaned);
+    setSaving(true);
+    try {
+      await updateAgent(agentId, { model, modelFallbacks: cleaned });
+      flashSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fallbackChoices = allModelOptions.filter((opt) => opt.value !== model);
+
+  const handleAddFallback = async () => {
+    const used = new Set(modelFallbacks);
+    const next = fallbackChoices.find((opt) => !used.has(opt.value));
+    if (!next) return;
+    await persistFallbacks([...modelFallbacks, next.value]);
+  };
+
+  const handleChangeFallback = async (index: number, value: string) => {
+    const next = [...modelFallbacks];
+    next[index] = value;
+    await persistFallbacks(next);
+  };
+
+  const handleMoveFallback = async (index: number, dir: -1 | 1) => {
+    const swap = index + dir;
+    if (swap < 0 || swap >= modelFallbacks.length) return;
+    const next = [...modelFallbacks];
+    [next[index], next[swap]] = [next[swap], next[index]];
+    await persistFallbacks(next);
+  };
+
+  const handleRemoveFallback = async (index: number) => {
+    await persistFallbacks(modelFallbacks.filter((_, i) => i !== index));
   };
 
   // Optimistic — flip the UI immediately, then persist. On failure we
@@ -661,6 +711,68 @@ export default function AgentModelsPage() {
             </>
           )}
         </p>
+        <div className="mt-4 border-t border-border/60 pt-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-medium">Fallback Order</h4>
+              <p className="text-xs text-muted-foreground mt-1">
+                When the active model returns a quota-style error like <code className="text-[11px]">AllocationQuota.FreeTierOnly</code>, FastClaw will try the next model in this order.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleAddFallback}
+              disabled={saving || !model.trim() || modelFallbacks.length >= fallbackChoices.length}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add Fallback
+            </Button>
+          </div>
+          {!model.trim() ? (
+            <p className="text-xs text-muted-foreground">
+              Pick an active model first, then arrange the fallback chain for this agent.
+            </p>
+          ) : modelFallbacks.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No fallback models configured yet.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {modelFallbacks.map((fallback, index) => {
+                const usedElsewhere = new Set(modelFallbacks.filter((_, i) => i !== index));
+                const rowOptions = fallbackChoices.filter((opt) => opt.value === fallback || !usedElsewhere.has(opt.value));
+                return (
+                  <div key={`${fallback}-${index}`} className="flex items-center gap-2">
+                    <span className="w-5 text-xs text-muted-foreground text-right">{index + 1}.</span>
+                    <Select value={fallback} onValueChange={(v: string | null) => v && handleChangeFallback(index, v)} disabled={saving}>
+                      <SelectTrigger className="font-mono text-sm">
+                        <SelectValue placeholder="Select fallback model" />
+                      </SelectTrigger>
+                      <SelectContent className="!w-auto !min-w-[var(--anchor-width)] !overflow-x-visible">
+                        {rowOptions.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value}>
+                            <span className="font-mono text-sm whitespace-nowrap">{opt.value}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleMoveFallback(index, -1)} disabled={saving || index === 0}>
+                      <ArrowUp className="h-4 w-4" />
+                    </Button>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleMoveFallback(index, 1)} disabled={saving || index === modelFallbacks.length - 1}>
+                      <ArrowDown className="h-4 w-4" />
+                    </Button>
+                    <Button type="button" size="icon" variant="ghost" onClick={() => handleRemoveFallback(index)} disabled={saving}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Providers Table */}

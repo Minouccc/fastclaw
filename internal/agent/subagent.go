@@ -64,7 +64,7 @@ func (a *Agent) RunSubagent(ctx context.Context, task string, maxIterations int)
 // transient API error during a Chat call); callers fold that into the
 // tool_result so the parent agent can react.
 func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations int) (string, error) {
-	if a.provider == nil {
+	if len(a.llmAttempts()) == 0 {
 		return "", fmt.Errorf("agent has no provider configured")
 	}
 	if maxIterations <= 0 {
@@ -141,7 +141,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 			})
 		}
 
-		resp, err := a.provider.Chat(ctx, llmMsgs, callTools, a.model, a.maxTokens, a.temperature)
+		resp, _, err := a.chatWithFallback(ctx, llmMsgs, callTools)
 		if err != nil {
 			// If the ctx itself expired, the parent caller has more
 			// useful framing than "context deadline exceeded" mid-
@@ -237,7 +237,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 		"phase":     "final-delivery",
 	}})
 	finalMessages := append(messages, capReachedNudge(maxIterations))
-	finalResp, err := a.provider.Chat(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	finalResp, _, err := a.chatWithFallback(ctx, finalMessages, nil)
 	if err != nil {
 		return "", fmt.Errorf("subagent forced final delivery failed: %w", err)
 	}

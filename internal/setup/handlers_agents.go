@@ -57,6 +57,43 @@ func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
 	return ""
 }
 
+func (s *Server) agentScopeModelFallbacks(r *http.Request, agentID string) []string {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return nil
+	}
+	raw, ok := rec.Data["modelFallbacks"]
+	if !ok {
+		return nil
+	}
+	if parts, ok := raw.([]string); ok {
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	}
+	parts, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		s, ok := part.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // saveAgentScopeModel upserts (model="") or deletes (model=="") the
 // agent-scope agents.defaults row.
 func (s *Server) saveAgentScopeModel(r *http.Request, agentID, model string) error {
@@ -463,6 +500,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		Name              string    `json:"name,omitempty"`
 		Description       *string   `json:"description,omitempty"` // ptr so empty-string clears it
 		Model             *string   `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
+		ModelFallbacks    *[]string `json:"modelFallbacks,omitempty"`
 		IsPublic          *bool     `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
 		ShareModelConfig  *bool     `json:"shareModelConfig,omitempty"`
 		// PromptMode is a ptr so the caller can distinguish "leave
@@ -549,6 +587,23 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			defaultsPatch["model"] = m
 		}
 	}
+	if req.ModelFallbacks != nil {
+		out := make([]string, 0, len(*req.ModelFallbacks))
+		seen := map[string]bool{}
+		for _, ref := range *req.ModelFallbacks {
+			ref = strings.TrimSpace(ref)
+			if ref == "" || seen[ref] {
+				continue
+			}
+			seen[ref] = true
+			out = append(out, ref)
+		}
+		if len(out) == 0 {
+			defaultsPatch["modelFallbacks"] = nil
+		} else {
+			defaultsPatch["modelFallbacks"] = out
+		}
+	}
 	if req.PromptMode != nil {
 		pm := strings.TrimSpace(*req.PromptMode)
 		// Allow only the documented values plus empty (= clear).
@@ -602,6 +657,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"name":             rec.Name,
 			"model":            s.agentScopeModel(r, rec.ID),
+			"modelFallbacks":   s.agentScopeModelFallbacks(r, rec.ID),
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
 			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
 			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
@@ -642,6 +698,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"role":             role,
 			"model":            s.agentScopeModel(r, rec.ID),
+			"modelFallbacks":   s.agentScopeModelFallbacks(r, rec.ID),
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
 			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
 			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
