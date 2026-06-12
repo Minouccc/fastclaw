@@ -534,16 +534,17 @@ func defaultAgentFileConfigLoader(_, home string) (AgentFileConfig, bool) {
 // scoped DB tables and are NOT persisted here.
 type AgentFileConfig struct {
 	Model                string                     `json:"model,omitempty"`
+	ModelFallbacks       []string                   `json:"modelFallbacks,omitempty"`
 	MaxTokens            int                        `json:"maxTokens,omitempty"`
 	Temperature          float64                    `json:"temperature,omitempty"`
 	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
 	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
-	Workspace         string                     `json:"workspace,omitempty"`
-	Skills            SkillsConfig               `json:"skills,omitempty"`
-	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
-	ToolProviders     map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
-	Tools             map[string]ToolCategoryCfg `json:"tools,omitempty"`
-	Providers         map[string]ProviderConfig  `json:"providers,omitempty"`
+	Workspace            string                     `json:"workspace,omitempty"`
+	Skills               SkillsConfig               `json:"skills,omitempty"`
+	MCPServers           map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	ToolProviders        map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
+	Tools                map[string]ToolCategoryCfg `json:"tools,omitempty"`
+	Providers            map[string]ProviderConfig  `json:"providers,omitempty"`
 	// PromptMode mirrors AgentEntry.PromptMode at the file-config layer.
 	// Non-empty values override the entry-level setting.
 	PromptMode string `json:"promptMode,omitempty"`
