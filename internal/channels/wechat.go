@@ -397,19 +397,36 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 		return
 	}
 
+	itemDebug := make([]map[string]any, 0, len(m.ItemList))
 	var text string
 	var photoURLs []string
 	for _, item := range m.ItemList {
+		entry := map[string]any{"type": item.Type}
 		switch item.Type {
 		case wechatItemTypeText:
+			if item.TextItem != nil {
+				entry["text_len"] = len(item.TextItem.Text)
+			}
 			if text == "" && item.TextItem != nil && item.TextItem.Text != "" {
 				text = item.TextItem.Text
 			}
 		case wechatItemTypeImage:
+			if item.ImageItem != nil {
+				entry["image_url"] = item.ImageItem.URL
+				entry["mid_size"] = item.ImageItem.MidSize
+				entry["has_media"] = item.ImageItem.Media != nil
+				if item.ImageItem.Media != nil {
+					entry["has_encrypt_query_param"] = item.ImageItem.Media.EncryptQueryParam != ""
+				}
+			}
 			if item.ImageItem != nil && item.ImageItem.URL != "" {
 				photoURLs = append(photoURLs, w.inlineVisionImageURL(item.ImageItem.URL))
 			}
 		case wechatItemTypeVoice:
+			if item.VoiceItem != nil {
+				entry["voice_text_len"] = len(item.VoiceItem.Text)
+				entry["playtime"] = item.VoiceItem.Playtime
+			}
 			// iLink ships speech-to-text transcription alongside the
 			// audio bytes — use it directly so the agent sees the
 			// user's spoken request as text without us having to
@@ -417,8 +434,28 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 			if text == "" && item.VoiceItem != nil && item.VoiceItem.Text != "" {
 				text = item.VoiceItem.Text
 			}
+		case wechatItemTypeVideo:
+			if item.VideoItem != nil {
+				entry["video_size"] = item.VideoItem.VideoSize
+				entry["has_media"] = item.VideoItem.Media != nil
+			}
+		case wechatItemTypeFile:
+			if item.FileItem != nil {
+				entry["file_name"] = item.FileItem.FileName
+				entry["file_len"] = item.FileItem.Len
+				entry["has_media"] = item.FileItem.Media != nil
+			}
 		}
+		itemDebug = append(itemDebug, entry)
 	}
+	slog.Debug("wechat inbound payload",
+		"account", w.accountID,
+		"from", m.FromUserID,
+		"message_id", m.MessageID,
+		"message_type", m.MessageType,
+		"message_state", m.MessageState,
+		"context_token_present", m.ContextToken != "",
+		"items", itemDebug)
 	if text == "" && len(photoURLs) == 0 {
 		slog.Debug("wechat skipping unsupported message",
 			"account", w.accountID, "from", m.FromUserID, "items", len(m.ItemList))
