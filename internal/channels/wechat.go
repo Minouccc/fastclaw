@@ -372,6 +372,23 @@ func (w *WeChat) Start(ctx context.Context) error {
 			w.getUpdatesBuf = resp.GetUpdatesBuf
 			w.saveBuf()
 		}
+		if len(resp.Msgs) > 0 {
+			slog.Debug("wechat getupdates batch",
+				"account", w.accountID,
+				"msg_count", len(resp.Msgs),
+				"next_buf_present", resp.GetUpdatesBuf != "",
+				"msgs", summarizeWeChatMessages(resp.Msgs))
+			if raw, err := json.Marshal(resp.Msgs); err == nil {
+				rawStr := string(raw)
+				if len(rawStr) > 16384 {
+					rawStr = rawStr[:16384] + "...<truncated>"
+				}
+				slog.Debug("wechat getupdates raw_msgs",
+					"account", w.accountID,
+					"bytes", len(raw),
+					"json", rawStr)
+			}
+		}
 		for _, m := range resp.Msgs {
 			w.dispatchInbound(m)
 		}
@@ -733,6 +750,31 @@ func (w *WeChat) getUpdates(ctx context.Context, buf string) (*wechatGetUpdatesR
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func summarizeWeChatMessages(msgs []wechatMessage) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		itemTypes := make([]int, 0, len(m.ItemList))
+		hasImageURL := false
+		for _, item := range m.ItemList {
+			itemTypes = append(itemTypes, item.Type)
+			if item.ImageItem != nil && item.ImageItem.URL != "" {
+				hasImageURL = true
+			}
+		}
+		out = append(out, map[string]any{
+			"message_id":            m.MessageID,
+			"from_user_id":          m.FromUserID,
+			"message_type":          m.MessageType,
+			"message_state":         m.MessageState,
+			"item_count":            len(m.ItemList),
+			"item_types":            itemTypes,
+			"context_token_present": m.ContextToken != "",
+			"has_image_url":         hasImageURL,
+		})
+	}
+	return out
 }
 
 func (w *WeChat) doPost(ctx context.Context, path string, body, result any) error {
