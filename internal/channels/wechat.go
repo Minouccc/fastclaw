@@ -392,11 +392,16 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 	}
 
 	var text string
+	var photoURLs []string
 	for _, item := range m.ItemList {
 		switch item.Type {
 		case wechatItemTypeText:
 			if item.TextItem != nil && item.TextItem.Text != "" {
 				text = item.TextItem.Text
+			}
+		case wechatItemTypeImage:
+			if item.ImageItem != nil && item.ImageItem.URL != "" {
+				photoURLs = append(photoURLs, item.ImageItem.URL)
 			}
 		case wechatItemTypeVoice:
 			// iLink ships speech-to-text transcription alongside the
@@ -411,7 +416,7 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 			break
 		}
 	}
-	if text == "" {
+	if text == "" && len(photoURLs) == 0 {
 		slog.Debug("wechat skipping unsupported message",
 			"account", w.accountID, "from", m.FromUserID, "items", len(m.ItemList))
 		return
@@ -423,7 +428,7 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 	// would require parsing room_id which the current iLink response
 	// shape doesn't expose.
 	slog.Info("wechat message received",
-		"account", w.accountID, "from", m.FromUserID, "len", len(text))
+		"account", w.accountID, "from", m.FromUserID, "len", len(text), "photos", len(photoURLs))
 
 	// Remember this user's most recent ContextToken so a subsequent
 	// SendTyping(chatID) can mint a typing_ticket without round-trip-
@@ -435,7 +440,7 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 		w.ctxTokensMu.Unlock()
 	}
 
-	w.bus.Inbound <- bus.InboundMessage{
+	in := bus.InboundMessage{
 		Channel:   "wechat",
 		AccountID: w.accountID,
 		ChatID:    m.FromUserID, // 1:1 — sender is also the chat key
@@ -444,6 +449,13 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 		Text:      text,
 		PeerKind:  "dm",
 	}
+	if len(photoURLs) > 0 {
+		in.PhotoURL = photoURLs[0]
+		if len(photoURLs) > 1 {
+			in.PhotoURLs = append(in.PhotoURLs, photoURLs[1:]...)
+		}
+	}
+	w.bus.Inbound <- in
 }
 
 // Send sends a plain text message — the simple form. Used by tools

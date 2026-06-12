@@ -15,6 +15,10 @@ RUN pnpm build
 # --- Stage 2: Build Go binary ---
 FROM golang:1.25-alpine AS go-builder
 RUN apk add --no-cache git
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
