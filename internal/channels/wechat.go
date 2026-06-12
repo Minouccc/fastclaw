@@ -80,6 +80,12 @@ const (
 	// the CDN leg can be slow for larger images.
 	wechatMediaSendTimeout = 90 * time.Second
 
+	// Best-effort inline fetch window for inbound WeChat images. We
+	// prefer converting them to data URLs before handing them to vision
+	// models because WeChat CDN links are often temporary or auth-bound.
+	wechatInboundImageTimeout  = 20 * time.Second
+	wechatInboundImageMaxBytes = 8 * 1024 * 1024
+
 	// Threshold of consecutive empty-buf SessionExpired responses before
 	// we declare the bot token dead and fire onExpired. iLink returns
 	// SessionExpired when the supplied get_updates_buf is missing or
@@ -396,24 +402,21 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 	for _, item := range m.ItemList {
 		switch item.Type {
 		case wechatItemTypeText:
-			if item.TextItem != nil && item.TextItem.Text != "" {
+			if text == "" && item.TextItem != nil && item.TextItem.Text != "" {
 				text = item.TextItem.Text
 			}
 		case wechatItemTypeImage:
 			if item.ImageItem != nil && item.ImageItem.URL != "" {
-				photoURLs = append(photoURLs, item.ImageItem.URL)
+				photoURLs = append(photoURLs, w.inlineVisionImageURL(item.ImageItem.URL))
 			}
 		case wechatItemTypeVoice:
 			// iLink ships speech-to-text transcription alongside the
 			// audio bytes — use it directly so the agent sees the
 			// user's spoken request as text without us having to
 			// download + transcribe ourselves.
-			if item.VoiceItem != nil && item.VoiceItem.Text != "" {
+			if text == "" && item.VoiceItem != nil && item.VoiceItem.Text != "" {
 				text = item.VoiceItem.Text
 			}
-		}
-		if text != "" {
-			break
 		}
 	}
 	if text == "" && len(photoURLs) == 0 {
@@ -456,6 +459,60 @@ func (w *WeChat) dispatchInbound(m wechatMessage) {
 		}
 	}
 	w.bus.Inbound <- in
+}
+
+// inlineVisionImageURL best-effort fetches a WeChat-hosted image and
+// converts it to a data URL before it reaches the LLM. Remote WeChat
+// image URLs often aren't publicly fetchable by model providers even
+// when the dashboard can still preview them.
+func (w *WeChat) inlineVisionImageURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || strings.HasPrefix(rawURL, "data:") {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return rawURL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wechatInboundImageTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return rawURL
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Debug("wechat inline image fetch failed",
+			"account", w.accountID, "url", rawURL, "error", err)
+		return rawURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Debug("wechat inline image fetch non-2xx",
+			"account", w.accountID, "url", rawURL, "status", resp.StatusCode)
+		return rawURL
+	}
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = contentType[:i]
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		slog.Debug("wechat inline image fetch non-image content-type",
+			"account", w.accountID, "url", rawURL, "content_type", contentType)
+		return rawURL
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, wechatInboundImageMaxBytes+1))
+	if err != nil {
+		slog.Debug("wechat inline image fetch read failed",
+			"account", w.accountID, "url", rawURL, "error", err)
+		return rawURL
+	}
+	if len(body) == 0 || len(body) > wechatInboundImageMaxBytes {
+		slog.Debug("wechat inline image fetch size rejected",
+			"account", w.accountID, "url", rawURL, "bytes", len(body))
+		return rawURL
+	}
+	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(body)
 }
 
 // Send sends a plain text message — the simple form. Used by tools

@@ -1,6 +1,10 @@
 package channels
 
 import (
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +29,7 @@ func TestWeChatDispatchInboundImageOnly(t *testing.T) {
 			{
 				Type: wechatItemTypeImage,
 				ImageItem: &wechatImageItem{
-					URL: "https://img.example/a.jpg",
+					URL: "http://127.0.0.1:1/a.jpg",
 				},
 			},
 		},
@@ -39,7 +43,7 @@ func TestWeChatDispatchInboundImageOnly(t *testing.T) {
 		if got.ChatID != "wx-user-1" || got.UserID != "wx-user-1" {
 			t.Fatalf("user routing = (%q, %q), want (wx-user-1, wx-user-1)", got.ChatID, got.UserID)
 		}
-		if got.PhotoURL != "https://img.example/a.jpg" {
+		if got.PhotoURL != "http://127.0.0.1:1/a.jpg" {
 			t.Fatalf("PhotoURL = %q, want image URL", got.PhotoURL)
 		}
 		if got.Text != "" {
@@ -73,13 +77,13 @@ func TestWeChatDispatchInboundTextAndMultipleImages(t *testing.T) {
 			{
 				Type: wechatItemTypeImage,
 				ImageItem: &wechatImageItem{
-					URL: "https://img.example/1.jpg",
+					URL: "http://127.0.0.1:1/1.jpg",
 				},
 			},
 			{
 				Type: wechatItemTypeImage,
 				ImageItem: &wechatImageItem{
-					URL: "https://img.example/2.jpg",
+					URL: "http://127.0.0.1:1/2.jpg",
 				},
 			},
 		},
@@ -90,13 +94,31 @@ func TestWeChatDispatchInboundTextAndMultipleImages(t *testing.T) {
 		if got.Text != "看看这两张图" {
 			t.Fatalf("Text = %q, want caption text", got.Text)
 		}
-		if got.PhotoURL != "https://img.example/1.jpg" {
+		if got.PhotoURL != "http://127.0.0.1:1/1.jpg" {
 			t.Fatalf("PhotoURL = %q, want first image URL", got.PhotoURL)
 		}
-		if len(got.PhotoURLs) != 1 || got.PhotoURLs[0] != "https://img.example/2.jpg" {
+		if len(got.PhotoURLs) != 1 || got.PhotoURLs[0] != "http://127.0.0.1:1/2.jpg" {
 			t.Fatalf("PhotoURLs = %#v, want second image URL only", got.PhotoURLs)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for inbound text+images message")
+	}
+}
+
+func TestWeChatInlineVisionImageURLConvertsFetchableImageToDataURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	defer srv.Close()
+
+	wc := &WeChat{accountID: "acct-1"}
+	got := wc.inlineVisionImageURL(srv.URL + "/photo.png")
+	wantSuffix := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	if !strings.HasPrefix(got, "data:image/png;base64,") {
+		t.Fatalf("got %q, want data:image/png;base64,...", got)
+	}
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("data URL payload mismatch: got %q, want suffix %q", got, wantSuffix)
 	}
 }
