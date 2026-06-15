@@ -25,6 +25,33 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
+func applyAgentDefaultsOverlay(rc *config.ResolvedAgent, ovr config.AgentDefaults) {
+	if ovr.Model != "" {
+		rc.Model = ovr.Model
+	}
+	if ovr.ModelFallbacks != nil {
+		rc.ModelFallbacks = append([]string(nil), ovr.ModelFallbacks...)
+	}
+	if ovr.MaxTokens > 0 {
+		rc.MaxTokens = ovr.MaxTokens
+	}
+	if ovr.Temperature > 0 {
+		rc.Temperature = ovr.Temperature
+	}
+	if ovr.MaxToolIterations > 0 {
+		rc.MaxToolIterations = ovr.MaxToolIterations
+	}
+	if ovr.MaxParallelToolCalls > 0 {
+		rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
+	}
+	if ovr.Thinking != "" {
+		rc.Thinking = ovr.Thinking
+	}
+	if ovr.PolicyPreset != "" {
+		rc.PolicyPreset = ovr.PolicyPreset
+	}
+}
+
 // loadAgentSkillEntries collects every agent-scope skills.entries row
 // owned by this user. Mirrors the same logic in the HTTP layer; kept
 // here so the runtime gateway never imports the setup handlers package.
@@ -415,28 +442,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	applyOwnerOverlays := !isForeign || shareCfg
 	if isForeign && applyOwnerOverlays {
 		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {
-			ovr := ownerCfg.Agents.Defaults
-			if ovr.Model != "" {
-				rc.Model = ovr.Model
-			}
-			if ovr.MaxTokens > 0 {
-				rc.MaxTokens = ovr.MaxTokens
-			}
-			if ovr.Temperature > 0 {
-				rc.Temperature = ovr.Temperature
-			}
-			if ovr.MaxToolIterations > 0 {
-				rc.MaxToolIterations = ovr.MaxToolIterations
-			}
-			if ovr.MaxParallelToolCalls > 0 {
-				rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
-			}
-			if ovr.Thinking != "" {
-				rc.Thinking = ovr.Thinking
-			}
-			if ovr.PolicyPreset != "" {
-				rc.PolicyPreset = ovr.PolicyPreset
-			}
+			applyAgentDefaultsOverlay(&rc, ownerCfg.Agents.Defaults)
 		}
 		// Pull only the owner's user-scope provider rows (not the
 		// owner's full merged view) so we don't re-apply system rows
@@ -458,27 +464,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			var ovr config.AgentDefaults
 			blob, _ := json.Marshal(cfgRec.Data)
 			_ = json.Unmarshal(blob, &ovr)
-			if ovr.Model != "" {
-				rc.Model = ovr.Model
-			}
-			if ovr.MaxTokens > 0 {
-				rc.MaxTokens = ovr.MaxTokens
-			}
-			if ovr.Temperature > 0 {
-				rc.Temperature = ovr.Temperature
-			}
-			if ovr.MaxToolIterations > 0 {
-				rc.MaxToolIterations = ovr.MaxToolIterations
-			}
-			if ovr.MaxParallelToolCalls > 0 {
-				rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
-			}
-			if ovr.Thinking != "" {
-				rc.Thinking = ovr.Thinking
-			}
-			if ovr.PolicyPreset != "" {
-				rc.PolicyPreset = ovr.PolicyPreset
-			}
+			applyAgentDefaultsOverlay(&rc, ovr)
 			// Keep this overlay aligned with the owner-path equivalent in
 			// loadUserSpace — missing fields silently break per-agent
 			// settings for chatters who lazy-attach the agent via a
@@ -668,27 +654,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		if rec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && rec != nil {
 			blob, _ := json.Marshal(rec.Data)
 			_ = json.Unmarshal(blob, &agentOverride)
-			if agentOverride.Model != "" {
-				rc.Model = agentOverride.Model
-			}
-			if agentOverride.MaxTokens > 0 {
-				rc.MaxTokens = agentOverride.MaxTokens
-			}
-			if agentOverride.Temperature > 0 {
-				rc.Temperature = agentOverride.Temperature
-			}
-			if agentOverride.MaxToolIterations > 0 {
-				rc.MaxToolIterations = agentOverride.MaxToolIterations
-			}
-			if agentOverride.MaxParallelToolCalls > 0 {
-				rc.MaxParallelToolCalls = agentOverride.MaxParallelToolCalls
-			}
-			if agentOverride.Thinking != "" {
-				rc.Thinking = agentOverride.Thinking
-			}
-			if agentOverride.PolicyPreset != "" {
-				rc.PolicyPreset = agentOverride.PolicyPreset
-			}
+			applyAgentDefaultsOverlay(rc, agentOverride)
 			if agentOverride.PromptMode != "" {
 				rc.PromptMode = agentOverride.PromptMode
 			}

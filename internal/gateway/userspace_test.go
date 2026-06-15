@@ -2,14 +2,39 @@ package gateway
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
+
+func TestApplyAgentDefaultsOverlayCopiesModelFallbacks(t *testing.T) {
+	rc := config.ResolvedAgent{
+		Model:          "openai/primary",
+		ModelFallbacks: []string{"openai/old-a", "openai/old-b"},
+	}
+	ovr := config.AgentDefaults{
+		Model:          "openai/override",
+		ModelFallbacks: []string{"openai/fallback-a", "openai/fallback-b"},
+	}
+	applyAgentDefaultsOverlay(&rc, ovr)
+	if rc.Model != "openai/override" {
+		t.Fatalf("Model = %q, want override", rc.Model)
+	}
+	want := []string{"openai/fallback-a", "openai/fallback-b"}
+	if !reflect.DeepEqual(rc.ModelFallbacks, want) {
+		t.Fatalf("ModelFallbacks = %#v, want %#v", rc.ModelFallbacks, want)
+	}
+	ovr.ModelFallbacks[0] = "mutated"
+	if !reflect.DeepEqual(rc.ModelFallbacks, want) {
+		t.Fatalf("ModelFallbacks should be copied, got %#v", rc.ModelFallbacks)
+	}
+}
 
 // readUserScopeAgentDefaults must distinguish "user has no row" from
 // "user explicitly chose the system default". EnsureAgent relies on the
